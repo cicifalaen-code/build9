@@ -34,6 +34,8 @@ jobs:
     env:
       PAYLOAD: ${{ inputs.payload }}
       JOB_ID: ${{ inputs.jobId }}
+      # versi Flutter untuk fallback otomatis (sebelum IconData jadi final di 3.44)
+      LEGACY_FLUTTER: "3.38.x"
     steps:
       - name: Parse payload
         id: p
@@ -141,13 +143,13 @@ jobs:
           PY
           fi
 
-      - name: Build (Flutter / Android native)
+      - name: Tulis script build
         if: steps.p.outputs.mode == 'zip'
-        working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          cat > "$RUNNER_TEMP/build_zip.sh" <<'SH'
           set -e
           MODE=release
-          [ "${{ steps.p.outputs.buildType }}" = "debug" ] && MODE=debug
+          [ "$BUILD_TYPE" = "debug" ] && MODE=debug
           mkdir -p "$GITHUB_WORKSPACE/out"
 
           if [ -f pubspec.yaml ]; then
@@ -169,6 +171,44 @@ jobs:
             if [ "$MODE" = "debug" ]; then ./gradlew assembleDebug --no-daemon; else ./gradlew assembleRelease --no-daemon; fi
             find . -path '*build/outputs/apk*' -name '*.apk' -exec cp {} "$GITHUB_WORKSPACE/out/" \;
           fi
+          SH
+
+      - name: Build (Flutter / Android native)
+        id: build_zip
+        if: steps.p.outputs.mode == 'zip'
+        continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          BUILD_TYPE: ${{ steps.p.outputs.buildType }}
+        run: bash "$RUNNER_TEMP/build_zip.sh"
+
+      # ───── FALLBACK otomatis: kalau build gagal & user tidak pin versi, ulang pakai Flutter lama ─────
+      - name: Fallback - pasang Flutter lama
+        if: steps.p.outputs.mode == 'zip' && steps.build_zip.outcome == 'failure' && steps.p.outputs.flutterVersion == ''
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.LEGACY_FLUTTER }}
+          cache: true
+
+      - name: Fallback - build ulang (Flutter lama)
+        id: build_zip_legacy
+        if: steps.p.outputs.mode == 'zip' && steps.build_zip.outcome == 'failure' && steps.p.outputs.flutterVersion == ''
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          BUILD_TYPE: ${{ steps.p.outputs.buildType }}
+        run: |
+          echo "Build dengan Flutter terbaru gagal, mengulang dengan Flutter ${LEGACY_FLUTTER}"
+          flutter --version
+          flutter clean || true
+          rm -f pubspec.lock
+          bash "$RUNNER_TEMP/build_zip.sh"
+
+      - name: Gagal (build tidak berhasil)
+        if: steps.p.outputs.mode == 'zip' && steps.build_zip.outcome == 'failure' && steps.p.outputs.flutterVersion != ''
+        run: |
+          echo "Build gagal dengan Flutter ${{ steps.p.outputs.flutterVersion }} (sesuai payload)."
+          exit 1
 
       # ───────────── MODE URL: APK WebView dari link web ─────────────
       - name: Generate WebView app
